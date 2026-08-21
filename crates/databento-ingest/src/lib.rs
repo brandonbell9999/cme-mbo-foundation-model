@@ -4,7 +4,8 @@
 //! reconstructs the L2 order book via `BookBuilder`, and emits 100ms
 //! `BookSnapshot` structs during RTH (09:30–16:00 ET).
 
-use book_builder::BookBuilder;
+use book_builder::flow::FlowState;
+use book_builder::{BookBuilder, CommittedState};
 use common::book::BookSnapshot;
 use common::event::{DayEventBuffer, MBOEvent};
 use common::time_utils;
@@ -39,6 +40,13 @@ pub struct DayIngestResult {
     pub total_records: u64,
     /// Number of MBO records matching the target instrument.
     pub instrument_records: u64,
+    /// Tick-level mid-prices at every F_LAST boundary during RTH.
+    pub tick_mids: Vec<(u64, f32)>,
+    /// Committed book states at every F_LAST boundary during RTH.
+    pub committed_states: Vec<CommittedState>,
+    /// Flow accumulator snapshots at every F_LAST boundary during RTH.
+    /// Parallel to `committed_states` — same length, same ordering.
+    pub flow_states: Vec<FlowState>,
 }
 
 /// Convert a Databento action char to the integer code used in `MBOEvent`.
@@ -139,8 +147,25 @@ pub fn ingest_day_file(
         None => return Err(IngestError::NoRecords(instrument_id)),
     };
 
-    // Emit snapshots during RTH
+    // Extract tick-level mid-prices and filter to RTH range
+    let all_tick_mids = builder.take_tick_mid_prices();
+    let tick_mids: Vec<(u64, f32)> = all_tick_mids
+        .into_iter()
+        .filter(|(ts, _)| *ts >= rth_open && *ts < rth_close)
+        .collect();
+
+    // Emit snapshots during RTH (must happen before take_committed_states)
     let snapshots = builder.emit_snapshots(rth_open, rth_close);
+
+    // Extract committed states and flow states, filter to RTH range.
+    // Both are parallel (same length, same ordering) from BookBuilder.
+    let all_committed = builder.take_committed_states();
+    let all_flow = builder.take_flow_states();
+    let (committed_states, flow_states): (Vec<CommittedState>, Vec<FlowState>) = all_committed
+        .into_iter()
+        .zip(all_flow)
+        .filter(|(cs, _)| cs.ts >= rth_open && cs.ts < rth_close)
+        .unzip();
 
     Ok(DayIngestResult {
         snapshots,
@@ -149,6 +174,9 @@ pub fn ingest_day_file(
         last_ts,
         total_records,
         instrument_records,
+        tick_mids,
+        committed_states,
+        flow_states,
     })
 }
 
